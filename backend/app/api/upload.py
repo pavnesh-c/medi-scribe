@@ -1,12 +1,19 @@
 import logging
 import os
-from flask import Blueprint, request, jsonify
-from app.models.models import UploadSession, Recording
+from flask import Blueprint, request, jsonify, current_app
+from app.models.models import UploadSession, Recording, Transcription, SOAPNote
 from app.utils.db import commit_changes
 from app import db
+from werkzeug.utils import secure_filename
+from app.services.transcription import TranscriptionService
+from app.services.soap_note import SOAPNoteService
 
 logger = logging.getLogger(__name__)
 bp = Blueprint('upload', __name__)
+
+# Initialize services
+transcription_service = TranscriptionService()
+soap_note_service = SOAPNoteService()
 
 # Ensure uploads directory exists
 UPLOADS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 'uploads')
@@ -40,88 +47,81 @@ def combine_chunks(session_id: str, file_name: str) -> str:
 
 @bp.route('/upload/init', methods=['POST'])
 def init_upload():
+    """Initialize a new upload session."""
     try:
-        data = request.json
-        if not all(key in data for key in ['id', 'file_name', 'total_size', 'total_chunks']):
+        data = request.get_json()
+        if not data or 'filename' not in data or 'total_chunks' not in data or 'chunk_size' not in data:
             return jsonify({
                 "status": "error",
-                "message": "Missing required fields: id, file_name, total_size, total_chunks"
+                "message": "Missing required fields"
             }), 400
-        existing_session = UploadSession.query.get(data['id'])
-        if existing_session:
-            return jsonify({
-                "status": "error",
-                "message": "Session ID already exists"
-            }), 409
+
         session = UploadSession(
-            id=data['id'],
-            file_name=data['file_name'],
-            total_size=data['total_size'],
+            file_name=data['filename'],
+            total_size=data['chunk_size'],
             total_chunks=data['total_chunks'],
-            status='uploading',
-            chunks_received=0
+            status='uploading'
         )
         db.session.add(session)
         commit_changes()
+        logger.info(f"Created upload session {session.id} for file {data['filename']}")
+
         return jsonify({
             "status": "ok",
-            "message": "Upload session initialized",
-            "id": session.id
+            "session_id": session.id
         })
     except Exception as e:
-        logger.error(f"Error initializing upload session: {str(e)}")
+        logger.error(f"Error initializing upload: {str(e)}")
         return jsonify({
             "status": "error",
-            "message": "Failed to initialize upload session"
+            "message": "Failed to initialize upload"
         }), 500
 
 @bp.route('/upload/chunk', methods=['POST'])
 def upload_chunk():
+    """Upload a chunk of the file."""
     try:
-        if 'session_id' not in request.form:
+        if 'file' not in request.files:
             return jsonify({
                 "status": "error",
-                "message": "Missing session_id"
+                "message": "No file part"
             }), 400
-        if 'chunk_number' not in request.form:
+
+        file = request.files['file']
+        if file.filename == '':
             return jsonify({
                 "status": "error",
-                "message": "Missing chunk_number"
+                "message": "No selected file"
             }), 400
-        if 'chunk' not in request.files:
+
+        session_id = request.form.get('session_id')
+        chunk_index = int(request.form.get('chunk_index', 0))
+
+        if not session_id:
             return jsonify({
                 "status": "error",
-                "message": "Missing chunk file"
+                "message": "No session ID provided"
             }), 400
-        session_id = request.form['session_id']
-        chunk_number = int(request.form['chunk_number'])
-        chunk = request.files['chunk']
+
         session = UploadSession.query.get(session_id)
         if not session:
             return jsonify({
                 "status": "error",
-                "message": "Session not found"
-            }), 404
-        if session.status != 'uploading':
-            return jsonify({
-                "status": "error",
-                "message": f"Invalid session status: {session.status}"
+                "message": "Invalid session ID"
             }), 400
-        if chunk_number >= session.total_chunks:
-            return jsonify({
-                "status": "error",
-                "message": f"Invalid chunk number: {chunk_number}. Total chunks: {session.total_chunks}"
-            }), 400
-        chunk_path = os.path.join(UPLOADS_DIR, f"{session_id}_{chunk_number}")
-        chunk.save(chunk_path)
-        logger.info(f"Saved chunk {chunk_number} for session {session_id} to {chunk_path}")
+
+        logger.info(f"Uploading chunk {chunk_index} for session {session_id} (current chunks_received={session.chunks_received}, total_chunks={session.total_chunks})")
+
+        # Save chunk
+        chunk_path = os.path.join(UPLOADS_DIR, f"{session_id}_{chunk_index}")
+        file.save(chunk_path)
         session.chunks_received += 1
         commit_changes()
+        logger.info(f"Saved chunk {chunk_index} for session {session_id} (new chunks_received={session.chunks_received})")
+
         return jsonify({
             "status": "ok",
-            "message": "Chunk uploaded successfully",
-            "chunks_received": session.chunks_received,
-            "total_chunks": session.total_chunks
+            "chunks_received": session.chunks_received
         })
     except Exception as e:
         logger.error(f"Error uploading chunk: {str(e)}")
@@ -132,27 +132,32 @@ def upload_chunk():
 
 @bp.route('/upload/finish', methods=['POST'])
 def finish_upload():
+    """Finish the upload and start processing."""
     try:
-        data = request.json
-        if 'session_id' not in data:
+        data = request.get_json()
+        if not data or 'session_id' not in data:
             return jsonify({
                 "status": "error",
-                "message": "Missing session_id"
+                "message": "Missing session ID"
             }), 400
+
         session_id = data['session_id']
         session = UploadSession.query.get(session_id)
         if not session:
             return jsonify({
                 "status": "error",
-                "message": "Session not found"
-            }), 404
+                "message": "Invalid session ID"
+            }), 400
+
+        logger.info(f"Finishing upload for session {session_id}: chunks_received={session.chunks_received}, total_chunks={session.total_chunks}")
+        
         if session.chunks_received != session.total_chunks:
+            logger.error(f"Chunk count mismatch: received {session.chunks_received} chunks, expected {session.total_chunks} chunks")
             return jsonify({
                 "status": "error",
-                "message": f"Not all chunks uploaded: {session.chunks_received}/{session.total_chunks}"
+                "message": f"Not all chunks received (received {session.chunks_received}, expected {session.total_chunks})"
             }), 400
-        session.status = 'combining'
-        commit_changes()
+
         try:
             final_path = combine_chunks(session_id, session.file_name)
             recording = Recording(
@@ -165,6 +170,56 @@ def finish_upload():
             db.session.add(recording)
             commit_changes()
             logger.info(f"Created recording record for session {session_id}")
+
+            # Process recording synchronously
+            try:
+                # Transcribe audio
+                transcription_result = transcription_service.transcribe_audio(recording.file_path)
+                
+                # Create transcription record
+                transcription = Transcription(
+                    recording_id=recording.id,
+                    text=transcription_result['text'],
+                    diarized_text=transcription_result.get('diarized_text'),
+                    status='completed'
+                )
+                db.session.add(transcription)
+                db.session.commit()
+
+                # Generate SOAP note
+                soap_note, _ = soap_note_service.generate_soap_note(transcription_result['diarized_text'])
+                
+                # Create SOAP note record
+                soap = SOAPNote(
+                    recording_id=recording.id,
+                    transcription_id=transcription.id,
+                    subjective=soap_note['subjective'],
+                    objective=soap_note['objective'],
+                    assessment=soap_note['assessment'],
+                    plan=soap_note['plan'],
+                    status='finalized'
+                )
+                db.session.add(soap)
+                db.session.commit()
+
+                # Update recording status
+                recording.status = 'completed'
+                db.session.commit()
+
+                return jsonify({
+                    "status": "ok",
+                    "message": "Processing completed successfully",
+                    "file_path": final_path,
+                    "recording_id": recording.id,
+                    "transcription_id": transcription.id,
+                    "soap_note_id": soap.id
+                })
+            except Exception as e:
+                logger.error(f"Error processing recording: {str(e)}")
+                recording.status = 'failed'
+                db.session.commit()
+                raise
+
         except Exception as e:
             logger.error(f"Error combining chunks for session {session_id}: {str(e)}")
             session.status = 'failed'
@@ -173,53 +228,9 @@ def finish_upload():
                 "status": "error",
                 "message": "Failed to combine chunks"
             }), 500
-        return jsonify({
-            "status": "ok",
-            "message": "Chunks combined successfully",
-            "file_path": final_path,
-            "recording_id": recording.id
-        })
     except Exception as e:
         logger.error(f"Error finishing upload: {str(e)}")
         return jsonify({
             "status": "error",
             "message": "Failed to finish upload"
-        }), 500
-
-@bp.route('/upload/<session_id>', methods=['DELETE'])
-def delete_upload(session_id):
-    try:
-        session = UploadSession.query.get(session_id)
-        if not session:
-            return jsonify({
-                "status": "error",
-                "message": "Session not found"
-            }), 404
-        for i in range(session.total_chunks):
-            chunk_path = os.path.join(UPLOADS_DIR, f"{session_id}_{i}")
-            if os.path.exists(chunk_path):
-                try:
-                    os.remove(chunk_path)
-                    logger.info(f"Deleted chunk file: {chunk_path}")
-                except Exception as e:
-                    logger.error(f"Error deleting chunk file {chunk_path}: {str(e)}")
-        final_path = os.path.join(UPLOADS_DIR, session.file_name)
-        if os.path.exists(final_path):
-            try:
-                os.remove(final_path)
-                logger.info(f"Deleted combined file: {final_path}")
-            except Exception as e:
-                logger.error(f"Error deleting combined file {final_path}: {str(e)}")
-        db.session.delete(session)
-        commit_changes()
-        logger.info(f"Deleted upload session: {session_id}")
-        return jsonify({
-            "status": "ok",
-            "message": "Upload session deleted successfully"
-        })
-    except Exception as e:
-        logger.error(f"Error deleting upload session: {str(e)}")
-        return jsonify({
-            "status": "error",
-            "message": "Failed to delete upload session"
         }), 500 

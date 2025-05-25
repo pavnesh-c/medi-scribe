@@ -140,9 +140,9 @@ def update_soap_note(soap_note_id):
         logger.error(f"[SOAP] Error updating SOAP note: {str(e)}")
         return jsonify({"status": "error", "message": str(e)}), 500
 
-@bp.route('/soap-note', methods=['GET'])
-def get_all_soap_notes():
-    """Get all SOAP notes."""
+@bp.route('/soap-notes', methods=['GET'])
+def list_soap_notes():
+    """List all SOAP notes."""
     try:
         logger.info("[SOAP] Getting all SOAP notes")
         

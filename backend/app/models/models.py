@@ -1,10 +1,11 @@
 from datetime import datetime
-from app import db
+import uuid
+from app.extensions import db
 
 class UploadSession(db.Model):
     __tablename__ = 'upload_sessions'
     
-    id = db.Column(db.String(36), primary_key=True)
+    id = db.Column(db.String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     file_name = db.Column(db.String(255), nullable=False)
     total_size = db.Column(db.Integer, nullable=False)
     total_chunks = db.Column(db.Integer, nullable=False)

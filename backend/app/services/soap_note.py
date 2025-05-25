@@ -1,10 +1,12 @@
 import os
 import logging
-import openai
 import json
 from typing import Dict, List, Tuple
+from openai import OpenAI
+from app.utils.logger import service_logger
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
-logger = logging.getLogger(__name__)
+logger = service_logger
 
 # --- Configuration Constants ---
 MAX_CHUNK_UTTERANCES = 40  # Maximum number of utterances per chunk to fit within context window
@@ -14,6 +16,7 @@ SUMMARIZATION_MAX_TOKENS = 500
 SOAP_NOTE_MAX_TOKENS = 1000
 TEMPERATURE_SUMMARIZATION = 0.3
 TEMPERATURE_SOAP_NOTE = 0.3
+MAX_WORKERS = 4  # Maximum number of parallel workers for chunk processing
 
 class SOAPNoteService:
     def __init__(self):
@@ -25,8 +28,15 @@ class SOAPNoteService:
         if not self.api_key:
             logger.error("OPENAI_API_KEY environment variable is not set. Please set it before initializing the service.")
             raise ValueError("OPENAI_API_KEY environment variable is not set")
-        openai.api_key = self.api_key
+        self.client = OpenAI(api_key=self.api_key)
+        self.executor = ThreadPoolExecutor(max_workers=MAX_WORKERS)
         logger.info("SOAPNoteService initialized successfully.")
+
+    def __del__(self):
+        """
+        Cleanup resources when the service is destroyed.
+        """
+        self.executor.shutdown(wait=True)
 
     def _chunk_diarized_text(self, diarized_text: List[Dict], chunk_size: int = MAX_CHUNK_UTTERANCES) -> List[List[Dict]]:
         """
@@ -68,14 +78,14 @@ class SOAPNoteService:
 
         logger.info(f"[SOAP] Starting chunk summarization with {len(chunk)} utterances.")
         
+        # Only include speaker and text in the conversation
         conversation = "\n".join([
             f"{utterance.get('speaker', 'Unknown')}: {utterance.get('text', '')}"
             for utterance in chunk
         ])
-        logger.debug(f"[SOAP] Formatted conversation chunk for summarization:\n{conversation}")
         
         try:
-            response = openai.ChatCompletion.create(
+            response = self.client.chat.completions.create(
                 model=OPENAI_MODEL_CHUNK_SUMMARIZATION,
                 messages=[
                     {"role": "system", "content": """You are an expert medical scribe assistant. Your task is to provide a concise, factual summary of a segment of a medical conversation. 
@@ -94,66 +104,142 @@ class SOAPNoteService:
                 max_tokens=SUMMARIZATION_MAX_TOKENS
             )
             
-            logger.info(f"[SOAP] Received response from OpenAI for chunk summarization.")
-            response_content = response.choices[0].message.content
-            logger.debug(f"[SOAP] Raw response content for chunk: {response_content}")
-            
-            result = json.loads(response_content)
+            result = json.loads(response.choices[0].message.content)
             if not isinstance(result, dict) or "summary" not in result:
                 raise ValueError("JSON response missing 'summary' field or not a dictionary.")
             
-            logger.info(f"[SOAP] Successfully parsed JSON response for chunk summary.")
-            logger.debug(f"[SOAP] Parsed chunk summary: {result['summary']}")
             return result["summary"]
-        except openai.error.OpenAIError as e:
-            logger.error(f"[SOAP] OpenAI API error during chunk summarization: {e}")
-            raise
-        except json.JSONDecodeError as e:
-            logger.error(f"[SOAP] JSON decoding error from OpenAI chunk summary response: {e}. Raw response: {response_content}")
-            raise ValueError(f"Failed to decode JSON from OpenAI response: {e}")
         except Exception as e:
             logger.error(f"[SOAP] Unexpected error during chunk summarization: {e}")
+            raise
+
+    def _process_chunks_parallel(self, chunks: List[List[Dict]]) -> List[Tuple[List[Dict], str]]:
+        """
+        Process chunks in parallel using ThreadPoolExecutor.
+        """
+        chunk_summaries_data = []
+        futures = []
+
+        # Submit all chunk summarization tasks
+        for chunk in chunks:
+            future = self.executor.submit(self._summarize_chunk, chunk)
+            futures.append((chunk, future))
+
+        # Process completed tasks as they finish
+        for chunk, future in futures:
+            try:
+                summary = future.result()
+                chunk_summaries_data.append((chunk, summary))
+            except Exception as e:
+                logger.error(f"[SOAP] Failed to summarize chunk: {e}")
+                chunk_summaries_data.append((chunk, f"Error summarizing chunk: {str(e)}"))
+
+        return chunk_summaries_data
+
+    def generate_soap_note(self, diarized_text: List[Dict]) -> Tuple[Dict, List[Tuple[List[Dict], str]]]:
+        """
+        Generates a SOAP note from diarized transcription using hierarchical summarization.
+        Uses parallel processing for chunk summarization.
+        """
+        logger.info("[SOAP] Starting hierarchical SOAP note generation process.")
+        
+        if not diarized_text:
+            logger.error("[SOAP] Input 'diarized_text' is empty. Cannot generate SOAP note.")
+            raise ValueError("Input 'diarized_text' cannot be empty.")
+        
+        # 1. Chunk the conversation
+        chunks = self._chunk_diarized_text(diarized_text)
+        if not chunks:
+            logger.warning("[SOAP] No chunks generated from diarized text. Returning empty SOAP note.")
+            return { "subjective": "", "objective": "", "assessment": "", "plan": "" }, []
+        
+        # 2. Process chunks in parallel
+        try:
+            chunk_summaries_data = self._process_chunks_parallel(chunks)
+        except Exception as e:
+            logger.error(f"[SOAP] Error in parallel chunk processing: {e}")
+            return { "subjective": "", "objective": "", "assessment": "", "plan": "" }, []
+        
+        # Guardrail: Check if any summaries were successfully generated
+        if not chunk_summaries_data or all(s == "" for _, s in chunk_summaries_data):
+            logger.warning("[SOAP] No valid chunk summaries were generated. Cannot proceed with SOAP note generation.")
+            return { "subjective": "", "objective": "", "assessment": "", "plan": "" }, chunk_summaries_data
+
+        # 3. Aggregate summaries
+        aggregated_summary = "\n\n".join([summary for _, summary in chunk_summaries_data if summary])
+        if not aggregated_summary.strip():
+            logger.warning("[SOAP] Aggregated summary is empty after filtering. Cannot generate SOAP note.")
+            return { "subjective": "", "objective": "", "assessment": "", "plan": "" }, chunk_summaries_data
+
+        # 4. Generate final SOAP note
+        try:
+            response = self.client.chat.completions.create(
+                model=OPENAI_MODEL_SOAP_GENERATION,
+                messages=[
+                    {"role": "system", "content": """You are a highly skilled medical scribe AI. Your primary function is to transform a provided summary of a medical conversation into a structured and concise SOAP (Subjective, Objective, Assessment, Plan) note.
+                    Adhere strictly to the definitions of each section:
+                    - **Subjective (S):** Information reported by the patient (symptoms, chief complaint, relevant history, social/family history).
+                    - **Objective (O):** Observable and measurable data (physical exam findings, vital signs, lab results, imaging results). Do NOT include patient-reported symptoms here.
+                    - **Assessment (A):** The diagnosis or differential diagnoses, and the patient's progress or status.
+                    - **Plan (P):** Future actions (medications, referrals, follow-up appointments, patient education, further diagnostics).
+
+                    Your output MUST be a JSON object with 'subjective', 'objective', 'assessment', and 'plan' as keys. Ensure the JSON is valid and well-formed. Do NOT include any introductory or concluding remarks outside the JSON structure. If a section has no relevant information, provide an empty string for that section's value.
+                    """},
+                    {"role": "user", "content": f"""Create a comprehensive SOAP note from the following summarized medical conversation.
+                    
+                    Summarized Medical Conversation:
+                    {aggregated_summary}
+                    
+                    Provide the response as a JSON object with the following structure:
+                    {{
+                        "subjective": "...",
+                        "objective": "...",
+                        "assessment": "...",
+                        "plan": "..."
+                    }}"""}
+                ],
+                response_format={"type": "json_object"},
+                temperature=TEMPERATURE_SOAP_NOTE,
+                max_tokens=SOAP_NOTE_MAX_TOKENS
+            )
+            
+            soap_note = self._parse_soap_note(response.choices[0].message.content)
+            
+            # Ensure all expected keys are present
+            expected_keys = {"subjective", "objective", "assessment", "plan"}
+            for key in expected_keys:
+                if key not in soap_note:
+                    soap_note[key] = ""
+            
+            return soap_note, chunk_summaries_data
+            
+        except Exception as e:
+            logger.error(f"[SOAP] Error in final SOAP note generation: {e}")
             raise
 
     def _parse_soap_note(self, text: str) -> Dict:
         """
         Parses the SOAP note text into a structured dictionary.
         Prioritizes JSON parsing, then falls back to heuristic text extraction.
-
-        Args:
-            text: The raw string content of the SOAP note.
-
-        Returns:
-            A dictionary with 'subjective', 'objective', 'assessment', and 'plan' keys.
         """
         if not text:
-            logger.warning("[SOAP] Attempted to parse empty SOAP note text. Returning empty structure.")
             return { "subjective": "", "objective": "", "assessment": "", "plan": "" }
 
         try:
-            # Attempt to parse as JSON first (preferred output format)
             parsed_json = json.loads(text)
-            # Basic validation for JSON structure
             expected_keys = {"subjective", "objective", "assessment", "plan"}
             if expected_keys.issubset(parsed_json.keys()):
-                logger.info("[SOAP] Successfully parsed SOAP note as JSON.")
                 return parsed_json
-            else:
-                logger.warning(f"[SOAP] JSON parsed but missing expected keys. Falling back to text extraction. Keys found: {parsed_json.keys()}")
-                # If JSON is valid but not the expected structure, still try heuristic parsing
-                return self._heuristic_parse_soap_note_text(text)
+            return self._heuristic_parse_soap_note_text(text)
         except json.JSONDecodeError:
-            logger.warning("[SOAP] SOAP note text is not valid JSON. Attempting heuristic text extraction.")
-            # Fallback to heuristic text extraction if not valid JSON
             return self._heuristic_parse_soap_note_text(text)
         except Exception as e:
-            logger.error(f"[SOAP] Unexpected error during SOAP note parsing: {e}. Attempting heuristic text extraction.")
+            logger.error(f"[SOAP] Error during SOAP note parsing: {e}")
             return self._heuristic_parse_soap_note_text(text)
 
     def _heuristic_parse_soap_note_text(self, text: str) -> Dict:
         """
         Heuristically parses SOAP note sections from plain text.
-        This is a fallback method if JSON parsing fails.
         """
         sections = {
             "subjective": "",
@@ -186,129 +272,8 @@ class SOAPNoteService:
             elif current_section:
                 sections[current_section] += line + "\n"
         
-        # Clean up sections by stripping leading/trailing whitespace and extra newlines
+        # Clean up sections
         for key in sections:
             sections[key] = sections[key].strip()
         
-        logger.info("[SOAP] Successfully performed heuristic parsing of SOAP note text.")
         return sections
-
-    def generate_soap_note(self, diarized_text: List[Dict]) -> Tuple[Dict, List[Tuple[List[Dict], str]]]:
-        """
-        Generates a SOAP note from diarized transcription using hierarchical summarization.
-        This process involves:
-        1. Chunking the conversation into smaller, manageable segments.
-        2. Summarizing each chunk using an LLM.
-        3. Aggregating the chunk summaries.
-        4. Generating the final SOAP note from the aggregated summary using an LLM.
-
-        Args:
-            diarized_text: A list of dictionaries, each representing an utterance
-                           with 'speaker' and 'text' keys.
-
-        Returns:
-            A tuple containing:
-            - A dictionary representing the structured SOAP note (subjective, objective, assessment, plan).
-            - A list of tuples, where each tuple contains (original_chunk, chunk_summary_string).
-
-        Raises:
-            ValueError: If input diarized_text is empty or if any critical API call or parsing fails.
-        """
-        logger.info("[SOAP] Starting hierarchical SOAP note generation process.")
-        
-        if not diarized_text:
-            logger.error("[SOAP] Input 'diarized_text' is empty. Cannot generate SOAP note.")
-            raise ValueError("Input 'diarized_text' cannot be empty.")
-        
-        logger.debug(f"[SOAP] Input diarized_text length: {len(diarized_text)}")
-        
-        # 1. Chunk the conversation
-        chunks = self._chunk_diarized_text(diarized_text)
-        if not chunks:
-            logger.warning("[SOAP] No chunks generated from diarized text. Returning empty SOAP note.")
-            return { "subjective": "", "objective": "", "assessment": "", "plan": "" }, []
-        
-        # 2. Summarize each chunk
-        chunk_summaries_data = []
-        for idx, chunk in enumerate(chunks):
-            try:
-                summary = self._summarize_chunk(chunk)
-                chunk_summaries_data.append((chunk, summary))
-            except Exception as e:
-                logger.error(f"[SOAP] Failed to summarize chunk {idx+1}. Error: {e}. Skipping this chunk summary.")
-                # Optionally, you could append an empty summary or a placeholder
-                chunk_summaries_data.append((chunk, f"Error summarizing chunk: {e}")) 
-        
-        # Guardrail: Check if any summaries were successfully generated
-        if not chunk_summaries_data or all(s == "" for _, s in chunk_summaries_data):
-            logger.warning("[SOAP] No valid chunk summaries were generated. Cannot proceed with SOAP note generation.")
-            return { "subjective": "", "objective": "", "assessment": "", "plan": "" }, chunk_summaries_data
-
-        # 3. Aggregate summaries
-        aggregated_summary = "\n\n".join([summary for _, summary in chunk_summaries_data if summary]) # Only join non-empty summaries
-        if not aggregated_summary.strip():
-            logger.warning("[SOAP] Aggregated summary is empty after filtering. Cannot generate SOAP note.")
-            return { "subjective": "", "objective": "", "assessment": "", "plan": "" }, chunk_summaries_data
-
-        logger.info("[SOAP] Aggregated all valid chunk summaries.")
-        logger.debug(f"[SOAP] Aggregated summary for final SOAP note generation:\n{aggregated_summary}")
-        
-        # 4. Generate final SOAP note
-        logger.info("[SOAP] Generating final SOAP note from aggregated summary.")
-        try:
-            response = openai.ChatCompletion.create(
-                model=OPENAI_MODEL_SOAP_GENERATION,
-                messages=[
-                    {"role": "system", "content": """You are a highly skilled medical scribe AI. Your primary function is to transform a provided summary of a medical conversation into a structured and concise SOAP (Subjective, Objective, Assessment, Plan) note.
-                    Adhere strictly to the definitions of each section:
-                    - **Subjective (S):** Information reported by the patient (symptoms, chief complaint, relevant history, social/family history).
-                    - **Objective (O):** Observable and measurable data (physical exam findings, vital signs, lab results, imaging results). Do NOT include patient-reported symptoms here.
-                    - **Assessment (A):** The diagnosis or differential diagnoses, and the patient's progress or status.
-                    - **Plan (P):** Future actions (medications, referrals, follow-up appointments, patient education, further diagnostics).
-
-                    Your output MUST be a JSON object with 'subjective', 'objective', 'assessment', and 'plan' as keys. Ensure the JSON is valid and well-formed. Do NOT include any introductory or concluding remarks outside the JSON structure. If a section has no relevant information, provide an empty string for that section's value.
-                    """},
-                    {"role": "user", "content": f"""Create a comprehensive SOAP note from the following summarized medical conversation.
-                    
-                    Summarized Medical Conversation:
-                    {aggregated_summary}
-                    
-                    Provide the response as a JSON object with the following structure:
-                    {{
-                        "subjective": "...",
-                        "objective": "...",
-                        "assessment": "...",
-                        "plan": "..."
-                    }}"""}
-                ],
-                response_format={"type": "json_object"},
-                temperature=TEMPERATURE_SOAP_NOTE,
-                max_tokens=SOAP_NOTE_MAX_TOKENS
-            )
-            
-            logger.info("[SOAP] Received response from OpenAI for final SOAP note generation.")
-            soap_note_response_content = response.choices[0].message.content
-            logger.debug(f"[SOAP] Raw SOAP note response content: {soap_note_response_content}")
-            
-            # Use the robust parsing method
-            soap_note = self._parse_soap_note(soap_note_response_content)
-            
-            # Guardrail: Ensure all expected keys are present after parsing
-            expected_keys = {"subjective", "objective", "assessment", "plan"}
-            if not expected_keys.issubset(soap_note.keys()):
-                logger.error(f"[SOAP] Final SOAP note parsing resulted in missing expected keys. Keys found: {soap_note.keys()}")
-                # Attempt to fill missing keys with empty strings to prevent downstream errors
-                for key in expected_keys:
-                    if key not in soap_note:
-                        soap_note[key] = ""
-            
-            logger.info("[SOAP] Final SOAP note successfully generated and parsed.")
-            logger.debug(f"[SOAP] Final SOAP note data: {soap_note}")
-            return soap_note, chunk_summaries_data
-            
-        except openai.error.OpenAIError as e:
-            logger.error(f"[SOAP] OpenAI API error during final SOAP note generation: {e}")
-            raise
-        except Exception as e:
-            logger.error(f"[SOAP] Unexpected error during final SOAP note generation or parsing: {e}")
-            raise

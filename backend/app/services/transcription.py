@@ -1,10 +1,9 @@
 import os
-import logging
 import asyncio
 from deepgram import Deepgram
 from typing import Dict, List, Tuple
-
-logger = logging.getLogger(__name__)
+import json
+from app.utils.logger import service_logger
 
 class TranscriptionService:
     def __init__(self):
@@ -12,36 +11,11 @@ class TranscriptionService:
         if not self.api_key:
             raise ValueError("DEEPGRAM_API_KEY environment variable is not set")
         self.client = Deepgram(self.api_key)
+        self.logger = service_logger
 
-    def _analyze_speaker_patterns(self, utterances: List[Dict]) -> Tuple[int, float]:
-        """
-        Analyze speaker patterns to determine the most likely doctor.
-        Returns (doctor_speaker_id, confidence)
-        """
-        # Count utterances per speaker
-        speaker_counts = {}
-        speaker_confidences = {}
-        
-        for utterance in utterances:
-            speaker_id = utterance.get('speaker', 0)
-            confidence = utterance.get('speaker_confidence', 0.5)
-            
-            speaker_counts[speaker_id] = speaker_counts.get(speaker_id, 0) + 1
-            speaker_confidences[speaker_id] = speaker_confidences.get(speaker_id, 0) + confidence
-        
-        # Calculate average confidence per speaker
-        for speaker_id in speaker_confidences:
-            speaker_confidences[speaker_id] /= speaker_counts[speaker_id]
-        
-        # The speaker with the most utterances and highest confidence is likely the doctor
-        doctor_id = max(speaker_counts.items(), key=lambda x: (x[1], speaker_confidences[x[0]]))[0]
-        doctor_confidence = speaker_confidences[doctor_id]
-        
-        return doctor_id, doctor_confidence
-
-    def _map_speaker_to_role(self, speaker_id: int, doctor_id: int) -> str:
-        """Map speaker ID to role based on the identified doctor."""
-        return "Doctor" if speaker_id == doctor_id else "Patient"
+    def _map_speaker_to_role(self, speaker_id: int) -> str:
+        """Map speaker ID to a simple Speaker 1 or Speaker 2 label."""
+        return f"Speaker {speaker_id + 1}"
 
     def transcribe_audio(self, audio_path: str) -> dict:
         """
@@ -54,7 +28,17 @@ class TranscriptionService:
             dict: Transcription result with text, diarized utterances, and metadata
         """
         try:
-            logger.info(f"[TRANSCRIPTION] Starting transcription for file: {audio_path}")
+            self.logger.info(f"Starting transcription for file: {audio_path}")
+            
+            # Check if file exists and has content
+            if not os.path.exists(audio_path):
+                raise FileNotFoundError(f"Audio file not found: {audio_path}")
+            
+            file_size = os.path.getsize(audio_path)
+            if file_size == 0:
+                raise ValueError(f"Audio file is empty: {audio_path}")
+            
+            self.logger.info(f"File size: {file_size} bytes")
             
             with open(audio_path, 'rb') as audio:
                 source = {'buffer': audio, 'mimetype': 'audio/mp3'}
@@ -65,25 +49,28 @@ class TranscriptionService:
                     'punctuate': True,
                     'diarize': True,
                     'utterances': True,
-                    'diarize_version': '2'  # Use the latest diarization model
+                    'diarize_version': '2',
+                    'vad_turnoff': 500,
+                    'vad_events': True,
+                    'filler_words': False,
+                    'profanity_filter': False
                 }
+                
                 # Run the async transcription in a synchronous context
                 response = asyncio.run(self.client.transcription.prerecorded(source, options))
                 
-            logger.info(f"[TRANSCRIPTION] Successfully transcribed file: {audio_path}")
+            self.logger.info(f"Successfully transcribed file: {audio_path}")
+            self.logger.info(f"Response metadata: {response.get('metadata', {})}")
+            self.logger.info(f"Response results: {response.get('results', {})}")
             
             # Process diarized utterances
             utterances = response.get('results', {}).get('utterances', [])
             diarized_text = []
             
             if utterances:
-                # Analyze speaker patterns to identify the doctor
-                doctor_id, doctor_confidence = self._analyze_speaker_patterns(utterances)
-                logger.info(f"[TRANSCRIPTION] Identified doctor as speaker {doctor_id} with confidence {doctor_confidence:.2f}")
-                
                 for utterance in utterances:
                     speaker_id = utterance.get('speaker', 0)
-                    role = self._map_speaker_to_role(speaker_id, doctor_id)
+                    role = self._map_speaker_to_role(speaker_id)
                     text = utterance.get('transcript', '').strip()
                     if text:
                         diarized_text.append({
@@ -95,19 +82,32 @@ class TranscriptionService:
                             'speaker_confidence': utterance.get('speaker_confidence', 0)
                         })
             
+            # Get the full transcript even if no diarization
+            full_text = ""
+            if 'results' in response and 'channels' in response['results']:
+                channel = response['results']['channels'][0]
+                if 'alternatives' in channel and channel['alternatives']:
+                    full_text = channel['alternatives'][0].get('transcript', '').strip()
+            
+            # If no text was transcribed, raise an error
+            if not full_text and not diarized_text:
+                self.logger.warning(f"No text transcribed from file: {audio_path}")
+                self.logger.info(f"Response metadata: {response.get('metadata', {})}")
+                self.logger.info(f"Response results: {response.get('results', {})}")
+                raise ValueError("No speech detected in audio file")
+            
             return {
-                'text': response['results']['channels'][0]['alternatives'][0]['transcript'],
-                'words': response['results']['channels'][0]['alternatives'][0]['words'],
+                'text': full_text,
+                'words': response.get('results', {}).get('channels', [{}])[0].get('alternatives', [{}])[0].get('words', []),
                 'diarized_text': diarized_text,
                 'meta': {
-                    'duration': response['metadata']['duration'],
-                    'channels': response['metadata']['channels'],
-                    'confidence': response['results']['channels'][0]['alternatives'][0]['confidence'],
-                    'speakers': len(set(utterance.get('speaker', 0) for utterance in utterances)),
-                    'doctor_confidence': doctor_confidence if utterances else 0
+                    'duration': response.get('metadata', {}).get('duration', 0),
+                    'channels': response.get('metadata', {}).get('channels', 1),
+                    'confidence': response.get('results', {}).get('channels', [{}])[0].get('alternatives', [{}])[0].get('confidence', 0),
+                    'speakers': len(set(utterance.get('speaker', 0) for utterance in utterances))
                 }
             }
             
         except Exception as e:
-            logger.error(f"[TRANSCRIPTION] Error transcribing file {audio_path}: {str(e)}")
+            self.logger.error(f"Error transcribing file {audio_path}: {str(e)}")
             raise 

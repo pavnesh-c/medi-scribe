@@ -9,9 +9,16 @@ logger = logging.getLogger(__name__)
 bp = Blueprint('transcription', __name__)
 transcription_service = TranscriptionService()
 
-@bp.route('/transcription/start/<int:recording_id>', methods=['POST'])
+@bp.route('/transcription/start/<int:recording_id>', methods=['POST', 'OPTIONS'])
 def start_transcription(recording_id):
     """Start transcription for a recording."""
+    if request.method == 'OPTIONS':
+        response = jsonify({'status': 'ok'})
+        response.headers.add('Access-Control-Allow-Origin', '*')
+        response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
+        response.headers.add('Access-Control-Allow-Methods', 'POST,OPTIONS')
+        return response
+        
     try:
         logger.info(f"[TRANSCRIPTION] Starting transcription for recording_id={recording_id}")
         
@@ -33,19 +40,28 @@ def start_transcription(recording_id):
         # Process transcription synchronously
         process_transcription(recording, transcription)
         
-        return jsonify({
+        response = jsonify({
             "status": "ok",
             "message": "Transcription completed",
             "transcription_id": transcription.id
         })
+        response.headers.add('Access-Control-Allow-Origin', '*')
+        return response
         
     except Exception as e:
         logger.error(f"[TRANSCRIPTION] Error processing transcription: {str(e)}")
         return jsonify({"status": "error", "message": str(e)}), 500
 
-@bp.route('/transcription/<int:transcription_id>', methods=['GET'])
+@bp.route('/transcription/<int:transcription_id>', methods=['GET', 'OPTIONS'])
 def get_transcription(transcription_id):
     """Get transcription status and results."""
+    if request.method == 'OPTIONS':
+        response = jsonify({'status': 'ok'})
+        response.headers.add('Access-Control-Allow-Origin', '*')
+        response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
+        response.headers.add('Access-Control-Allow-Methods', 'GET,OPTIONS')
+        return response
+        
     try:
         logger.info(f"[TRANSCRIPTION] Getting transcription status: transcription_id={transcription_id}")
         
@@ -54,7 +70,7 @@ def get_transcription(transcription_id):
             logger.error(f"[TRANSCRIPTION] Transcription not found: transcription_id={transcription_id}")
             return jsonify({"status": "error", "message": "Transcription not found"}), 404
             
-        return jsonify({
+        response = jsonify({
             "status": "ok",
             "transcription": {
                 "id": transcription.id,
@@ -64,6 +80,8 @@ def get_transcription(transcription_id):
                 "meta": transcription.meta
             }
         })
+        response.headers.add('Access-Control-Allow-Origin', '*')
+        return response
         
     except Exception as e:
         logger.error(f"[TRANSCRIPTION] Error getting transcription: {str(e)}")
