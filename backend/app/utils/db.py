@@ -1,28 +1,26 @@
-from app import db
-from sqlalchemy.exc import SQLAlchemyError
 import logging
+from flask_migrate import Migrate
 
 logger = logging.getLogger(__name__)
+migrate = Migrate()
 
-def init_db(app):
+def init_db():
     """Initialize the database."""
     try:
-        with app.app_context():
-            db.create_all()
+        from app import db
+        db.create_all()
         logger.info("Database initialized successfully")
-    except SQLAlchemyError as e:
+    except Exception as e:
         logger.error(f"Failed to initialize database: {str(e)}")
         raise
 
-def get_db():
-    """Get database session."""
-    return db.session
-
 def commit_changes():
-    """Commit changes to database."""
+    """Commit changes to the database."""
     try:
+        from app import db
         db.session.commit()
-    except SQLAlchemyError as e:
+    except Exception as e:
+        from app import db
         db.session.rollback()
         logger.error(f"Failed to commit changes: {str(e)}")
         raise 

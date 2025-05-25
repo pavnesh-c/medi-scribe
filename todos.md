@@ -1,7 +1,7 @@
 Phase 1: Project Setup
 [x] Create project structure
 [x] Set up backend directory with Flask
-[ ] Set up frontend directory with Next.js
+[x] Set up frontend directory with Next.js
 [x] Create initial README.md
 [x] Backend Basic Setup
 [x] Create Flask application structure
@@ -18,30 +18,32 @@ Phase 1: Project Setup
 [x] Create frontend Dockerfile
 [x] Create docker-compose.yml
 [x] Test Docker setup
+
 Phase 2: Backend Core Features
-[ ] File Upload System
-[ ] Create upload session model
-[ ] Implement chunked upload endpoints
-[ ] Create file storage service
-[ ] Implement chunk combination logic
-[ ] Add error handling for uploads
-[ ] Recording Management
-[ ] Create recording model
-[ ] Implement recording endpoints
-[ ] Add file validation
-[ ] Implement cleanup routines
-[ ] Transcription Service
-[ ] Set up Deepgram/AssemblyAI integration
-[ ] Create transcription model
-[ ] Implement transcription endpoints
-[ ] Add transcription processing logic
-[ ] Implement error handling
-[ ] SOAP Note Generation
-[ ] Create SOAP note model
-[ ] Implement AI integration
-[ ] Create note generation endpoints
-[ ] Add note validation
-[ ] Implement note update logic
+[x] File Upload System
+[x] Create upload session model
+[x] Implement chunked upload endpoints
+[x] Create file storage service
+[x] Implement chunk combination logic
+[x] Add error handling for uploads
+[x] Recording Management
+[x] Create recording model
+[x] Implement recording endpoints
+[x] Add file validation
+[x] Implement cleanup routines
+[x] Transcription Service
+[x] Set up Deepgram/AssemblyAI integration
+[x] Create transcription model
+[x] Implement transcription endpoints
+[x] Add transcription processing logic
+[x] Implement error handling
+[x] SOAP Note Generation
+[x] Create SOAP note model
+[x] Implement AI integration
+[x] Create note generation endpoints
+[x] Add note validation
+[x] Implement note update logic
+
 Phase 3: Frontend Implementation
 [ ] Basic Frontend Setup
 [ ] Set up Next.js with TypeScript
@@ -64,26 +66,17 @@ Phase 3: Frontend Implementation
 [ ] Add loading states
 [ ] Implement error states
 [ ] SOAP Note Interface
-[ ] Create note viewer component
-[ ] Implement note editor
-[ ] Add section highlighting
-[ ] Implement save/update functionality
-Phase 4: Testing & Documentation
+
+Phase 4: Documentation
 [ ] Backend Testing
-[ ] Write unit tests for models
-[ ] Write unit tests for services
-[ ] Write integration tests
-[ ] Implement test coverage reporting
 [ ] Frontend Testing
-[ ] Write component tests
-[ ] Write integration tests
 [ ] Add end-to-end tests
-[ ] Implement test coverage reporting
 [ ] Documentation
 [ ] Write API documentation
 [ ] Create setup instructions
 [ ] Write user guide
 [ ] Add code comments
+
 Phase 5: Deployment & Optimization
 [ ] Performance Optimization
 [ ] Optimize database queries

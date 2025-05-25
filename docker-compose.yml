@@ -1,33 +1,6 @@
 version: "3.8"
 
 services:
-  backend:
-    build: ./backend
-    ports:
-      - "5000:5000"
-    volumes:
-      - ./backend:/app
-      - ./backend/uploads:/app/uploads
-      - ./backend/logs:/app/logs
-    environment:
-      - FLASK_APP=app
-      - FLASK_ENV=development
-      - DATABASE_URL=mysql+pymysql://root:root@db/medi_scribe
-    depends_on:
-      - db
-
-  frontend:
-    build: ./frontend
-    ports:
-      - "3000:3000"
-    volumes:
-      - ./frontend:/app
-      - /app/node_modules
-    environment:
-      - NEXT_PUBLIC_API_URL=http://localhost:5000/api/v1
-    depends_on:
-      - backend
-
   db:
     image: mysql:8.0
     ports:
@@ -37,6 +10,42 @@ services:
       - MYSQL_DATABASE=medi_scribe
     volumes:
       - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-proot"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  backend:
+    build: ./backend
+    ports:
+      - "5000:5000"
+    environment:
+      - FLASK_APP=app
+      - FLASK_ENV=development
+      - SECRET_KEY=your-secret-key-here
+      - DATABASE_URL=mysql+pymysql://root:root@db/medi_scribe
+      - UPLOAD_FOLDER=uploads
+      - MAX_CONTENT_LENGTH=500000000
+    volumes:
+      - ./backend:/app
+      - ./backend/uploads:/app/uploads
+    depends_on:
+      db:
+        condition: service_healthy
+
+  frontend:
+    build: ./frontend
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    environment:
+      - NEXT_PUBLIC_API_URL=http://localhost:5000
+    depends_on:
+      - backend
 
 volumes:
   mysql_data:

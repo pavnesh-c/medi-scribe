@@ -2,35 +2,44 @@ from flask import Flask
 from flask_sqlalchemy import SQLAlchemy
 from flask_migrate import Migrate
 from flask_cors import CORS
-import os
-from dotenv import load_dotenv
-
-# Load environment variables
-load_dotenv()
+from config import Config
+from app.utils.logger import setup_logger
+from app.utils.db import init_db
 
 # Initialize extensions
 db = SQLAlchemy()
 migrate = Migrate()
 
-def create_app():
+def create_app(config_class=Config):
     app = Flask(__name__)
+    app.config.from_object(config_class)
     
-    # Configure the app
-    app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', 'dev')
-    app.config['SQLALCHEMY_DATABASE_URI'] = os.getenv('DATABASE_URL', 'mysql+pymysql://root:root@localhost/medi_scribe')
-    app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
-    
-    # Initialize extensions with app
+    # Initialize extensions
     db.init_app(app)
     migrate.init_app(app, db)
     CORS(app)
     
-    # Register blueprints
-    from app.api import bp as api_bp
-    app.register_blueprint(api_bp, url_prefix='/api/v1')
+    # Setup logging
+    setup_logger(app)
     
-    # Create database tables
+    # Initialize database
     with app.app_context():
-        db.create_all()
+        init_db()
+    
+    # Register blueprints
+    from app.api.health import bp as health_bp
+    app.register_blueprint(health_bp, url_prefix='/api/v1')
+    
+    from app.api.upload import bp as upload_bp
+    app.register_blueprint(upload_bp, url_prefix='/api/v1')
+    
+    from app.api.recording import bp as recording_bp
+    app.register_blueprint(recording_bp, url_prefix='/api/v1')
+    
+    from app.api.transcription import bp as transcription_bp
+    app.register_blueprint(transcription_bp, url_prefix='/api/v1')
+    
+    from app.api.soap_note import bp as soap_note_bp
+    app.register_blueprint(soap_note_bp, url_prefix='/api/v1')
     
     return app 

@@ -48,3 +48,6 @@ backend/uploads/*
 !backend/uploads/.gitkeep
 backend/logs/*
 !backend/logs/.gitkeep 
+
+
+*.mp3
