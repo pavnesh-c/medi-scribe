@@ -45,12 +45,6 @@ DATABASE_URL=your_database_url
 UPLOAD_DIR=uploads
 ```
 
-### Frontend (.env.local)
-
-```
-NEXT_PUBLIC_API_URL=http://localhost:8000
-```
-
 ## Setup
 
 1. Clone the repository:
